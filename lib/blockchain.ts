@@ -72,27 +72,39 @@ export const getEscrowContract = (signerOrProvider?: ethers.Signer | ethers.Prov
 };
 
 // Client-side helper to ensure connected Web3 wallet is on Base Sepolia
-export const ensureBaseSepoliaNetwork = async (ethereum: any) => {
-  if (!ethereum) return;
+export const ensureBaseSepoliaNetwork = async (ethereum: any): Promise<boolean> => {
+  if (!ethereum) return false;
   try {
+    const currentChainId = await ethereum.request({ method: "eth_chainId" });
+    if (currentChainId === BASE_SEPOLIA_CHAIN_ID || currentChainId === "0x14a34") {
+      return true;
+    }
+    
     await ethereum.request({
       method: "wallet_switchEthereumChain",
       params: [{ chainId: BASE_SEPOLIA_CHAIN_ID }],
     });
+    return true;
   } catch (switchError: any) {
     if (switchError.code === 4902) {
-      await ethereum.request({
-        method: "wallet_addEthereumChain",
-        params: [
-          {
-            chainId: BASE_SEPOLIA_CHAIN_ID,
-            chainName: "Base Sepolia Testnet",
-            nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
-            rpcUrls: ["https://sepolia.base.org"],
-            blockExplorerUrls: ["https://sepolia.basescan.org"],
-          },
-        ],
-      });
+      try {
+        await ethereum.request({
+          method: "wallet_addEthereumChain",
+          params: [
+            {
+              chainId: BASE_SEPOLIA_CHAIN_ID,
+              chainName: "Base Sepolia Testnet",
+              nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
+              rpcUrls: ["https://sepolia.base.org"],
+              blockExplorerUrls: ["https://sepolia.basescan.org"],
+            },
+          ],
+        });
+        return true;
+      } catch (addErr) {
+        throw new Error("Failed to add Base Sepolia Testnet to wallet.");
+      }
     }
+    throw new Error("Wallet network is not Base Sepolia. Please switch to Base Sepolia Testnet in MetaMask.");
   }
 };
