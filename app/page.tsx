@@ -461,27 +461,19 @@ export default function Home() {
         </div>
         
         <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto justify-start sm:justify-end">
-          {config.liveMode ? (
-            <div className="glass-card px-4 py-2 flex items-center gap-2 text-sm font-mono border-emerald-500/30 bg-emerald-500/5">
-              <span className="status-indicator text-emerald-500 bg-emerald-500"></span>
-              <span className="text-slate-300">Base Sepolia:</span>
-              <a 
-                href={`https://sepolia.basescan.org/address/${config.escrowAddress}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-brand-blue hover:text-brand-blue-hover font-bold flex items-center gap-0.5"
-              >
-                <span>Live Escrow</span>
-                <ExternalLink className="size-3.5" />
-              </a>
-            </div>
-          ) : (
-            <div className="glass-card px-4 py-2 flex items-center gap-2 text-sm font-mono border-amber-500/30 bg-amber-500/5">
-              <span className="status-indicator text-amber-500 bg-amber-500"></span>
-              <span className="text-slate-300">Mode:</span>
-              <span className="text-amber-500 font-bold">Mock Simulation</span>
-            </div>
-          )}
+          <div className="glass-card px-4 py-2 flex items-center gap-2 text-sm font-mono border-emerald-500/30 bg-emerald-500/5">
+            <span className="status-indicator text-emerald-500 bg-emerald-500"></span>
+            <span className="text-slate-300">Network:</span>
+            <a 
+              href={`https://sepolia.basescan.org/address/${config.escrowAddress || "0x350c4B1028917Ff3EAeAeC98c58E77B7C0B9c4E2"}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-brand-blue hover:text-brand-blue-hover font-bold flex items-center gap-1 hover:underline"
+            >
+              <span>Base Sepolia Testnet</span>
+              <ExternalLink className="size-3.5" />
+            </a>
+          </div>
 
           <div className="glass-card px-4 py-2 flex items-center gap-2 text-sm font-mono border-card-border bg-[#121214]/80">
             <span className="text-slate-300">Block:</span>
