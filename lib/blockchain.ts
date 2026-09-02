@@ -1,5 +1,7 @@
 import { ethers } from "ethers";
 
+export const BASE_SEPOLIA_CHAIN_ID = "0x14a34"; // 84532 in Hex
+
 // Minimal ABIs to interact with the contracts from Next.js (server and client side)
 export const MOCK_USDC_ABI = [
   "function name() view returns (string)",
@@ -34,7 +36,6 @@ export const isLiveMode = (): boolean => {
   const hasEscrow = !!process.env.NEXT_PUBLIC_A2A_ESCROW_ADDRESS;
   const hasRpc = !!(process.env.BASE_SEPOLIA_RPC_URL || process.env.NEXT_PUBLIC_BASE_SEPOLIA_RPC_URL);
   
-  // Note: DEPLOYER_PRIVATE_KEY is server-side only
   return hasUSDC && hasEscrow && hasRpc;
 };
 
@@ -58,16 +59,40 @@ export const getSigner = (): ethers.Wallet => {
 
 // Helper to get USDC contract instance
 export const getUSDCContract = (signerOrProvider?: ethers.Signer | ethers.Provider) => {
-  const address = process.env.NEXT_PUBLIC_MOCK_USDC_ADDRESS;
-  if (!address) throw new Error("Mock USDC contract address is not configured");
+  const address = process.env.NEXT_PUBLIC_MOCK_USDC_ADDRESS || "0x85C3b89bd563ac3f915eC92534915ef1E13096d8";
   const connection = signerOrProvider || getProvider();
   return new ethers.Contract(address, MOCK_USDC_ABI, connection);
 };
 
 // Helper to get Escrow contract instance
 export const getEscrowContract = (signerOrProvider?: ethers.Signer | ethers.Provider) => {
-  const address = process.env.NEXT_PUBLIC_A2A_ESCROW_ADDRESS;
-  if (!address) throw new Error("A2AEscrow contract address is not configured");
+  const address = process.env.NEXT_PUBLIC_A2A_ESCROW_ADDRESS || "0x350c4B1028917Ff3EAeAeC98c58E77B7C0B9c4E2";
   const connection = signerOrProvider || getProvider();
   return new ethers.Contract(address, A2A_ESCROW_ABI, connection);
+};
+
+// Client-side helper to ensure connected Web3 wallet is on Base Sepolia
+export const ensureBaseSepoliaNetwork = async (ethereum: any) => {
+  if (!ethereum) return;
+  try {
+    await ethereum.request({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: BASE_SEPOLIA_CHAIN_ID }],
+    });
+  } catch (switchError: any) {
+    if (switchError.code === 4902) {
+      await ethereum.request({
+        method: "wallet_addEthereumChain",
+        params: [
+          {
+            chainId: BASE_SEPOLIA_CHAIN_ID,
+            chainName: "Base Sepolia Testnet",
+            nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
+            rpcUrls: ["https://sepolia.base.org"],
+            blockExplorerUrls: ["https://sepolia.basescan.org"],
+          },
+        ],
+      });
+    }
+  }
 };

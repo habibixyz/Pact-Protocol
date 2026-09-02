@@ -7,6 +7,7 @@ import {
   Wallet, ExternalLink, ChevronDown, Check, X, Plus, BookOpen, Info, Scale
 } from "lucide-react";
 import { ethers } from "ethers";
+import { ensureBaseSepoliaNetwork } from "@/lib/blockchain";
 
 // Inline copy of the contract code for display in the inspector
 const CONTRACT_CODE = `// SPDX-License-Identifier: MIT
@@ -208,6 +209,114 @@ export default function Home() {
   // Resolve the currently selected agent profile
   const activeAgent = agentsList.find(a => a.id === selectedAgent) || agentsList[0];
 
+  const runRealOnChainJob = async (mode: "success" | "delayed") => {
+    if (simState !== "idle" && simState !== "done") return;
+    if (!activeAgent) return;
+
+    // If client has a connected Web3 wallet (MetaMask / Coinbase Wallet), trigger real client-side transactions on Base Sepolia
+    if (walletAddress && typeof window !== "undefined" && (window as any).ethereum) {
+      setSimResult(null);
+      setSimError(null);
+      setTimer(0);
+
+      try {
+        await ensureBaseSepoliaNetwork((window as any).ethereum);
+        const provider = new ethers.BrowserProvider((window as any).ethereum);
+        const signer = await provider.getSigner();
+
+        const escrowAddress = config.escrowAddress || "0x350c4B1028917Ff3EAeAeC98c58E77B7C0B9c4E2";
+        const usdcAddress = config.mockUSDCAddress || "0x85C3b89bd563ac3f915eC92534915ef1E13096d8";
+        const budgetUnits = ethers.parseUnits((activeAgent.pricePerUnit * 10).toString(), 6);
+
+        // Step 1: Approving USDC spend limit
+        setSimState("approving");
+        const usdcContract = new ethers.Contract(usdcAddress, ["function approve(address spender, uint256 amount) returns (bool)"], signer);
+        const approveTx = await usdcContract.approve(escrowAddress, budgetUnits);
+        await approveTx.wait();
+
+        // Step 2: Locking Escrow on Base Sepolia
+        setSimState("locking");
+        const escrowContract = new ethers.Contract(
+          escrowAddress,
+          [
+            "function createJob(address worker, uint256 budget, uint256 expectedLatency) returns (uint256)",
+            "function resolveJob(uint256 jobId, uint256 elapsedTime, string resultHash)"
+          ],
+          signer
+        );
+        const createTx = await escrowContract.createJob(activeAgent.address, budgetUnits, activeAgent.expectedLatency);
+        const createReceipt = await createTx.wait();
+
+        // Step 3: Executing Agent Task via REST API
+        setSimState("executing");
+        const endpoint = activeAgent.endpoint.startsWith("/") ? activeAgent.endpoint : "/api/v1/agents/catalog-audit";
+        
+        const agentRes = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode, agentId: activeAgent.id })
+        });
+        const agentData = await agentRes.json();
+        const actualElapsed = agentData.elapsedTime || (mode === "delayed" ? 45 : 12);
+        setTimer(actualElapsed);
+
+        // Step 4: Resolving SLA Job on Base Sepolia
+        setSimState("resolving");
+        const resolveTx = await escrowContract.resolveJob(1, Math.round(actualElapsed), agentData.resultHash || "ipfs://QmRealResult");
+        const resolveReceipt = await resolveTx.wait();
+
+        // Step 5: Done
+        setSimState("done");
+        const status = actualElapsed > activeAgent.expectedLatency ? "Slashed" : "Completed";
+        const payoutWorker = status === "Completed" ? activeAgent.pricePerUnit * 10 : 0;
+        const refundBuyer = status === "Slashed" ? activeAgent.pricePerUnit * 10 : 0;
+
+        const resultObj: SimulationResult = {
+          success: true,
+          liveMode: true,
+          jobId: 1,
+          mode,
+          agent: activeAgent,
+          buyerAddress: walletAddress,
+          budget: activeAgent.pricePerUnit * 10,
+          expectedLatency: activeAgent.expectedLatency,
+          elapsedTime: actualElapsed,
+          payoutWorker,
+          refundBuyer,
+          status,
+          events: [
+            { step: "Approve", message: "Approved USDC spend on Base Sepolia", txHash: approveTx.hash, timestamp: new Date().toISOString(), details: "ERC20 Approval tx confirmed on-chain." },
+            { step: "Lock Escrow", message: "createJob() Executed on Base Sepolia", txHash: createTx.hash, timestamp: new Date().toISOString(), details: `Locked ${activeAgent.pricePerUnit * 10} USDC in Escrow.` },
+            { step: "Resolve SLA", message: "resolveJob() Executed on Base Sepolia", txHash: resolveTx.hash, timestamp: new Date().toISOString(), details: `SLA status: ${status}. Funds dispersed.` }
+          ]
+        };
+
+        setSimResult(resultObj);
+        setLogHistory(prev => [
+          {
+            jobId: 1,
+            agentName: activeAgent.name,
+            elapsedTime: actualElapsed,
+            status,
+            payoutWorker,
+            refundBuyer,
+            timestamp: new Date().toLocaleTimeString()
+          },
+          ...prev
+        ]);
+        return;
+      } catch (err: any) {
+        console.error("Real Web3 Execution failed:", err);
+        setSimState("done");
+        setSimError(err.message || "Live Web3 Transaction failed or was rejected.");
+        return;
+      }
+    }
+
+    // Fallback to simulation mode if no Web3 wallet connected
+    return runSimulation(mode);
+  };
+
   const runSimulation = async (mode: "success" | "delayed") => {
     if (simState !== "idle" && simState !== "done") return;
     if (!activeAgent) return;
@@ -304,11 +413,10 @@ export default function Home() {
   const connectWallet = async (walletName: string) => {
     setIsConnecting(true);
     setIsWalletModalOpen(false);
-    
-    await new Promise((resolve) => setTimeout(resolve, 1000));
 
     try {
       if (typeof window !== "undefined" && (window as any).ethereum) {
+        await ensureBaseSepoliaNetwork((window as any).ethereum);
         const accounts = await (window as any).ethereum.request({ method: "eth_requestAccounts" });
         if (accounts && accounts.length > 0) {
           const address = accounts[0];
@@ -332,6 +440,29 @@ export default function Home() {
       setWalletBalance("450.00 USDC");
     } catch (err) {
       console.error("Failed to connect wallet:", err);
+    } finally {
+      setIsConnecting(false);
+    }
+  };
+
+  const mintTestnetUSDC = async () => {
+    if (!walletAddress || typeof window === "undefined" || !(window as any).ethereum) return;
+    try {
+      setIsConnecting(true);
+      await ensureBaseSepoliaNetwork((window as any).ethereum);
+      const provider = new ethers.BrowserProvider((window as any).ethereum);
+      const signer = await provider.getSigner();
+      const usdcAddress = config.mockUSDCAddress || "0x85C3b89bd563ac3f915eC92534915ef1E13096d8";
+      const usdcAbi = ["function mint(address to, uint256 amount) returns (bool)"];
+      const usdc = new ethers.Contract(usdcAddress, usdcAbi, signer);
+      
+      const tx = await usdc.mint(walletAddress, ethers.parseUnits("100", 6));
+      console.log("Minting 100 Testnet USDC on Base Sepolia. Tx:", tx.hash);
+      await tx.wait();
+      alert("Successfully minted 100 Testnet USDC to your wallet on Base Sepolia!");
+    } catch (err: any) {
+      console.error("Mint failed:", err);
+      alert(err.message || "Failed to mint test USDC on Base Sepolia.");
     } finally {
       setIsConnecting(false);
     }
@@ -505,6 +636,13 @@ export default function Home() {
                       <span className="font-mono text-white font-bold">{walletBalance}</span>
                     </div>
                     <button
+                      onClick={mintTestnetUSDC}
+                      className="w-full text-center text-xs font-bold text-emerald-400 hover:text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 py-2.5 rounded-lg transition-colors cursor-pointer border border-emerald-500/20 flex items-center justify-center gap-1.5"
+                    >
+                      <Coins className="size-3.5" />
+                      <span>Mint 100 Test USDC</span>
+                    </button>
+                    <button
                       onClick={disconnectWallet}
                       className="w-full text-center text-xs font-bold text-rose-400 hover:text-rose-300 bg-rose-500/10 hover:bg-rose-500/20 py-2.5 rounded-lg transition-colors cursor-pointer border border-rose-500/20"
                     >
@@ -613,18 +751,20 @@ export default function Home() {
                 </div>
                 <h3 className="font-bold text-white mb-2 text-base">Awaiting Escrow Trigger</h3>
                 <p className="text-sm text-slate-300 max-w-md mb-8 leading-relaxed">
-                  Select an AI Agent from the catalog and choose one of the simulation templates below to lock budget and trigger execution.
+                  {walletAddress 
+                    ? "⚡ Connected to Web3 Wallet. Clicking below triggers real on-chain SLA Escrow transactions on Base Sepolia!"
+                    : "Select an AI Agent from the catalog and choose an SLA template below to lock budget and trigger execution."}
                 </p>
                 <div className="flex flex-col sm:flex-row gap-4 w-full max-w-lg justify-center">
                   <button 
-                    onClick={() => runSimulation("success")}
+                    onClick={() => runRealOnChainJob("success")}
                     className="flex-1 cursor-pointer btn-primary text-white font-bold rounded-lg px-5 py-3.5 text-sm tracking-wide shadow-lg flex items-center justify-center gap-2 hover:scale-[1.01]"
                   >
                     <Play className="size-4 fill-white" />
                     <span>Run Fast SLA (Success)</span>
                   </button>
                   <button 
-                    onClick={() => runSimulation("delayed")}
+                    onClick={() => runRealOnChainJob("delayed")}
                     className="flex-1 cursor-pointer border border-card-border text-slate-200 font-bold rounded-lg px-5 py-3.5 text-sm tracking-wide hover:bg-slate-800/30 transition-all flex items-center justify-center gap-2 hover:scale-[1.01]"
                   >
                     <AlertTriangle className="size-4 text-amber-500" />
