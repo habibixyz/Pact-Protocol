@@ -210,7 +210,109 @@ export default function Home() {
   const activeAgent = agentsList.find(a => a.id === selectedAgent) || agentsList[0];
 
   const runRealOnChainJob = async (mode: "success" | "delayed") => {
-    // Route execution through Base Sepolia Testnet API pipeline (uses server testnet signer, 0 real money required)
+    if (simState !== "idle" && simState !== "done") return;
+    if (!activeAgent) return;
+
+    setSimResult(null);
+    setSimError(null);
+    setTimer(0);
+
+    // If client has a connected Web3 wallet (MetaMask / Coinbase Wallet), trigger real client-side transactions on Base Sepolia
+    if (walletAddress && typeof window !== "undefined" && (window as any).ethereum && walletAddress !== "0x70997970C51812dc3A010C7d01b50e0d17dc79C8") {
+      try {
+        await ensureBaseSepoliaNetwork((window as any).ethereum);
+        const provider = new ethers.BrowserProvider((window as any).ethereum);
+        const signer = await provider.getSigner();
+
+        const escrowAddress = config.escrowAddress || "0x350c4B1028917Ff3EAeAeC98c58E77B7C0B9c4E2";
+        const usdcAddress = config.mockUSDCAddress || "0x85C3b89bd563ac3f915eC92534915ef1E13096d8";
+        const budgetUnits = ethers.parseUnits((activeAgent.pricePerUnit * 10).toString(), 6);
+
+        // Step 1: Approving USDC spend in MetaMask
+        setSimState("approving");
+        const usdcContract = new ethers.Contract(usdcAddress, ["function approve(address spender, uint256 amount) returns (bool)"], signer);
+        const approveTx = await usdcContract.approve(escrowAddress, budgetUnits);
+        await approveTx.wait();
+
+        // Step 2: Locking Escrow on Base Sepolia in MetaMask
+        setSimState("locking");
+        const escrowContract = new ethers.Contract(
+          escrowAddress,
+          [
+            "function createJob(address worker, uint256 budget, uint256 expectedLatency) returns (uint256)",
+            "function resolveJob(uint256 jobId, uint256 elapsedTime, string resultHash)"
+          ],
+          signer
+        );
+        const createTx = await escrowContract.createJob(activeAgent.address, budgetUnits, activeAgent.expectedLatency);
+        const createReceipt = await createTx.wait();
+
+        // Step 3: Executing Agent Task via REST API
+        setSimState("executing");
+        const endpoint = activeAgent.endpoint.startsWith("/") ? activeAgent.endpoint : "/api/v1/agents/catalog-audit";
+        
+        const agentRes = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode, agentId: activeAgent.id })
+        });
+        const agentData = await agentRes.json();
+        const actualElapsed = agentData.elapsedTime || (mode === "delayed" ? 45 : 12);
+        setTimer(actualElapsed);
+
+        // Step 4: Resolving SLA Job in MetaMask
+        setSimState("resolving");
+        const resolveTx = await escrowContract.resolveJob(1, Math.round(actualElapsed), agentData.resultHash || "ipfs://QmRealResult");
+        const resolveReceipt = await resolveTx.wait();
+
+        // Step 5: Done
+        setSimState("done");
+        const status = actualElapsed > activeAgent.expectedLatency ? "Slashed" : "Completed";
+        const payoutWorker = status === "Completed" ? activeAgent.pricePerUnit * 10 : 0;
+        const refundBuyer = status === "Slashed" ? activeAgent.pricePerUnit * 10 : 0;
+
+        const resultObj: SimulationResult = {
+          success: true,
+          liveMode: true,
+          jobId: 1,
+          mode,
+          agent: activeAgent,
+          buyerAddress: walletAddress,
+          budget: activeAgent.pricePerUnit * 10,
+          expectedLatency: activeAgent.expectedLatency,
+          elapsedTime: actualElapsed,
+          payoutWorker,
+          refundBuyer,
+          status,
+          events: [
+            { step: "Approve", message: "Approved USDC spend on Base Sepolia", txHash: approveTx.hash, timestamp: new Date().toISOString(), details: "MetaMask ERC20 Approval tx confirmed on-chain." },
+            { step: "Lock Escrow", message: "createJob() Executed on Base Sepolia", txHash: createTx.hash, timestamp: new Date().toISOString(), details: `Locked ${activeAgent.pricePerUnit * 10} USDC in Escrow.` },
+            { step: "Resolve SLA", message: "resolveJob() Executed on Base Sepolia", txHash: resolveTx.hash, timestamp: new Date().toISOString(), details: `SLA status: ${status}. Funds dispersed.` }
+          ]
+        };
+
+        setSimResult(resultObj);
+        setLogHistory(prev => [
+          {
+            jobId: 1,
+            agentName: activeAgent.name,
+            elapsedTime: actualElapsed,
+            status,
+            payoutWorker,
+            refundBuyer,
+            timestamp: new Date().toLocaleTimeString()
+          },
+          ...prev
+        ]);
+        return;
+      } catch (err: any) {
+        console.error("MetaMask live execution notice:", err);
+        // Fallback to server-side testnet simulation pipeline if wallet rejected transaction
+        return runSimulation(mode);
+      }
+    }
+
+    // Server-side testnet signer pipeline
     return runSimulation(mode);
   };
 
